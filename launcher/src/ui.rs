@@ -57,6 +57,14 @@ pub fn button(
         )
         .child(label.into())
 }
+pub fn icon_button(id: impl Into<ElementId>, glyph: &'static str) -> Stateful<Div> {
+    button(id, "", glyph, false)
+        .w(px(l::BUTTON))
+        .px(px(0.))
+        .gap(px(0.))
+        .justify_center()
+        .flex_shrink_0()
+}
 pub fn section_label(text: impl Into<SharedString>) -> Div {
     mono(text).text_size(px(11.))
 }

@@ -88,7 +88,7 @@ impl Launcher {
         }
     }
     pub fn reload_mods(&mut self) {
-        match builder::mods::discover(self.state.current()) {
+        match builder::mods::discover(self.state.current(), &self.store) {
             Ok(mods) => self.mods = mods,
             Err(e) => {
                 self.mods.clear();
@@ -189,34 +189,14 @@ impl Launcher {
         self.error = None;
         cx.notify();
     }
-    pub fn pick_mods(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+    pub fn open_mods_folder(&mut self, cx: &mut Context<Self>) {
+        let path = self.store.mods();
+        if let Err(error) = std::fs::create_dir_all(&path) {
+            self.error = Some(format!("Cannot create mods folder: {error}"));
+            cx.notify();
             return;
         }
-        let selected_id = self.state.selected.clone();
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose mixin mods folder".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = receiver.await
-                && let Some(path) = paths.first()
-            {
-                let path = path.clone();
-                let _ = this.update(cx, |app, cx| {
-                    if app.state.selected == selected_id && !app.busy {
-                        app.state.current_mut().mods_root = Some(path);
-                        app.state.current_mut().disabled_mods.clear();
-                        app.save();
-                        app.reload_mods();
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
+        self.open_folder(path, cx);
     }
     pub fn pick_field(&mut self, files: bool, cx: &mut Context<Self>) {
         let Some(dialog) = &self.dialog else {

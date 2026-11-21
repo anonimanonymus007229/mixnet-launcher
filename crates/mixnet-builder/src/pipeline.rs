@@ -159,7 +159,7 @@ fn run(store: &Store, state: &State, tx: &Sender<Event>, cancel: &AtomicBool) ->
             let workspace = store.workspace(&i.id);
             let selected = workspace.join("selected-mods");
             phase(tx, "Preparing selected mods");
-            mods::snapshot(i, &selected)?;
+            mods::snapshot(i, store, &selected)?;
             phase(tx, "Validating mixins");
             let mut check = configured(&ddmix, state);
             check

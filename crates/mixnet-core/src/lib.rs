@@ -19,7 +19,6 @@ pub struct Instance {
     pub id: String,
     pub name: String,
     pub client: Client,
-    pub mods_root: Option<PathBuf>,
     #[serde(default)]
     pub disabled_mods: Vec<String>,
 }
@@ -29,7 +28,6 @@ impl Instance {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             client,
-            mods_root: None,
             disabled_mods: vec![],
         }
     }
@@ -94,6 +92,7 @@ impl Store {
     pub fn initialize(&self) -> Result<State> {
         for dir in [
             "instances",
+            "mods",
             "sources",
             "workspaces",
             "cache/downloads",
@@ -118,6 +117,9 @@ impl Store {
             self.save(&state)?;
             Ok(state)
         }
+    }
+    pub fn mods(&self) -> PathBuf {
+        self.root.join("mods")
     }
     pub fn instance(&self, id: &str) -> PathBuf {
         self.root.join("instances").join(id)
@@ -172,6 +174,16 @@ mod tests {
         store.save(&state).unwrap();
         assert_eq!(store.initialize().unwrap().current().name, "My DDNet");
         assert!(store.instance(&state.selected).join("user").is_dir());
+        assert!(store.mods().is_dir());
+        // Legacy per-instance paths are ignored; the global mod folder is authoritative.
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy["instances"][0]["mods_root"] = serde_json::json!("old/custom/mods");
+        let loaded: State = serde_json::from_value(legacy).unwrap();
+        assert!(
+            serde_json::to_value(&loaded).unwrap()["instances"][0]
+                .get("mods_root")
+                .is_none()
+        );
         fs::write(root.join("instances.json"), "broken").unwrap();
         assert!(store.initialize().is_err());
         assert_eq!(
