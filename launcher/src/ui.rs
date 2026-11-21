@@ -98,6 +98,9 @@ impl AssetSource for Assets {
             Some("box") => "<path d='m3 7 9-5 9 5v10l-9 5-9-5zM3 7l9 5 9-5M12 12v10'/>",
             Some("chevron") => "<path d='m9 5 7 7-7 7'/>",
             Some("terminal") => "<path d='m4 6 6 6-6 6m8 0h8'/>",
+            Some("copy") => {
+                "<rect x='8' y='8' width='13' height='13' rx='2'/><path d='M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3'/>"
+            }
             Some("stop") => "<rect x='5' y='5' width='14' height='14' rx='1'/>",
             _ => return Ok(None),
         };

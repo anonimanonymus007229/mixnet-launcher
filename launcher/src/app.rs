@@ -1,5 +1,6 @@
 use crate::{
     dialogs::{Dialog, DialogKind},
+    log_view::LogView,
     source_picker::HomeCommit,
     ui::*,
 };
@@ -8,7 +9,6 @@ use mixnet_builder::{self as builder, mods::ModInfo, tools::ToolStatus};
 use mixnet_core::{State, Store};
 use mixnet_theme::{color as c, layout as l};
 use std::{
-    collections::VecDeque,
     path::PathBuf,
     sync::{
         Arc,
@@ -34,9 +34,8 @@ pub struct Launcher {
     pub error: Option<String>,
     pub busy: bool,
     pub phase: String,
-    pub logs: VecDeque<String>,
     pub show_logs: bool,
-    pub log_scroll: ScrollHandle,
+    pub log_view: Entity<LogView>,
     events: Option<Receiver<builder::Event>>,
     cancel: Option<Arc<AtomicBool>>,
     tool_events: Option<Receiver<Vec<ToolStatus>>>,
@@ -55,9 +54,8 @@ impl Launcher {
             error: None,
             busy: false,
             phase: "Ready when you are".into(),
-            logs: VecDeque::new(),
             show_logs: false,
-            log_scroll: ScrollHandle::new(),
+            log_view: cx.new(LogView::new),
             events: None,
             cancel: None,
             tool_events: None,
@@ -127,11 +125,7 @@ impl Launcher {
             changed = true;
             match e {
                 builder::Event::Log(line) => {
-                    if self.logs.len() >= 1500 {
-                        self.logs.pop_front();
-                    }
-                    self.logs.push_back(line);
-                    self.log_scroll.scroll_to_bottom();
+                    self.log_view.update(cx, |view, cx| view.append(line, cx));
                 }
                 builder::Event::Phase(phase) => self.phase = phase,
                 builder::Event::Finished(result) => {
@@ -158,7 +152,7 @@ impl Launcher {
             return;
         }
         self.error = None;
-        self.logs.clear();
+        self.log_view.update(cx, |view, cx| view.clear(cx));
         self.show_logs = true;
         self.busy = true;
         self.phase = "Starting…".into();
@@ -311,6 +305,14 @@ impl Launcher {
                         )
                     })
                     .child(
+                        button("copy-console", "Copy", "copy", false)
+                            .h(px(28.))
+                            .on_click(cx.listener(|a, _, _, cx| {
+                                let text = a.log_view.read(cx).copy_text();
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            })),
+                    )
+                    .child(
                         button("log-folder", "Logs", "folder", false)
                             .h(px(28.))
                             .on_click(cx.listener(|a, _, _, cx| {
@@ -331,32 +333,7 @@ impl Launcher {
                         })),
                     ),
             )
-            .when(self.show_logs, |d| {
-                d.child(
-                    column()
-                        .id("logs")
-                        .h(px(190.))
-                        .overflow_y_scroll()
-                        .track_scroll(&self.log_scroll)
-                        .px(px(l::GUTTER))
-                        .pb(px(16.))
-                        .gap(px(3.))
-                        .children(
-                            self.logs
-                                .iter()
-                                .rev()
-                                .take(200)
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                                .rev()
-                                .map(|line| {
-                                    mono(line.clone())
-                                        .text_size(px(11.))
-                                        .text_color(rgb(c::SOFT))
-                                }),
-                        ),
-                )
-            })
+            .when(self.show_logs, |d| d.child(self.log_view.clone()))
     }
 }
 impl Drop for Launcher {
