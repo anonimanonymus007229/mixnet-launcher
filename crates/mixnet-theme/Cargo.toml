@@ -1,0 +1,5 @@
+[package]
+name = "mixnet-theme"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
