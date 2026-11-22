@@ -86,7 +86,11 @@ impl Launcher {
         }
     }
     pub fn reload_mods(&mut self) {
-        match builder::mods::discover(self.state.current(), &self.store) {
+        let Some(instance) = self.state.current_opt() else {
+            self.mods.clear();
+            return;
+        };
+        match builder::mods::discover(instance, &self.store) {
             Ok(mods) => self.mods = mods,
             Err(e) => {
                 self.mods.clear();
@@ -148,7 +152,7 @@ impl Launcher {
         }
     }
     pub fn build_play(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.busy || self.state.current_opt().is_none() {
             return;
         }
         self.error = None;
@@ -298,9 +302,10 @@ impl Launcher {
                     .gap(px(10.))
                     .child(icon("terminal"))
                     .child(div().flex_1().text_size(px(12.)).child(self.phase.clone()))
-                    .when(self.busy, |r| {
+                    .when(self.busy && self.cancel.is_some(), |r| {
                         r.child(
                             button("stop", "Stop", "stop", false)
+                                .h(px(28.))
                                 .on_click(cx.listener(|a, _, _, cx| a.cancel(cx))),
                         )
                     })
@@ -316,7 +321,12 @@ impl Launcher {
                         button("log-folder", "Logs", "folder", false)
                             .h(px(28.))
                             .on_click(cx.listener(|a, _, _, cx| {
-                                a.open_folder(a.store.instance(&a.state.selected).join("logs"), cx)
+                                let path = a
+                                    .state
+                                    .current_opt()
+                                    .map(|i| a.store.instance(&i.id).join("logs"))
+                                    .unwrap_or_else(|| a.store.root.join("instances"));
+                                a.open_folder(path, cx)
                             })),
                     )
                     .child(

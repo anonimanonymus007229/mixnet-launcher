@@ -111,7 +111,7 @@ fn configured(path: &Path, state: &State) -> Command {
     cmd
 }
 fn run(store: &Store, state: &State, tx: &Sender<Event>, cancel: &AtomicBool) -> Result<()> {
-    let i = state.current();
+    let i = state.current_opt().context("No instance selected")?;
     store.prepare(i)?;
     let log = store.instance(&i.id).join("logs/session.log");
     fs::write(&log, format!("MixNet session — {}\n", i.name))?;
@@ -131,26 +131,15 @@ fn run(store: &Store, state: &State, tx: &Sender<Event>, cancel: &AtomicBool) ->
                     bail!("Choose a local folder or an HTTPS Git URL");
                 }
                 let git = tool(state, "git")?;
-                let dest = store.root.join("sources").join(&i.id);
+                let dest =
+                    crate::checkout::directory(&store.root.join("sources").join(&i.id), location)?;
                 if !dest.exists() {
                     let mut cmd = configured(&git, state);
                     cmd.args(["clone", "--recursive", "--", location])
                         .arg(&dest);
                     execute(cmd, &log, tx, cancel)?;
                 }
-                if !revision.trim().is_empty() {
-                    if revision.starts_with('-') {
-                        bail!("Invalid revision");
-                    }
-                    let mut cmd = configured(&git, state);
-                    cmd.arg("-C").arg(&dest).args(["checkout", revision]);
-                    execute(cmd, &log, tx, cancel)?;
-                    let mut cmd = configured(&git, state);
-                    cmd.arg("-C")
-                        .arg(&dest)
-                        .args(["submodule", "update", "--init", "--recursive"]);
-                    execute(cmd, &log, tx, cancel)?;
-                }
+                update_checkout(state, &dest, location, revision, &log, tx, cancel)?;
                 dest
             };
             if !source.join("CMakeLists.txt").is_file() {
@@ -243,6 +232,69 @@ fn run(store: &Store, state: &State, tx: &Sender<Event>, cancel: &AtomicBool) ->
     launch(store, i, state, &executable, &log, tx, cancel)?;
     Ok(())
 }
+fn update_checkout(
+    state: &State,
+    dest: &Path,
+    location: &str,
+    revision: &str,
+    log: &Path,
+    tx: &Sender<Event>,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let git = tool(state, "git")?;
+    let revision = if revision.trim().is_empty() {
+        "HEAD"
+    } else {
+        revision
+    };
+    anyhow::ensure!(
+        !revision.starts_with('-') && !revision.contains(['\r', '\n']),
+        "Invalid revision"
+    );
+    let mut remote = configured(&git, state);
+    remote
+        .arg("-C")
+        .arg(dest)
+        .args(["remote", "set-url", "origin", location]);
+    execute(remote, log, tx, cancel)?;
+    let pinned = crate::repository::is_commit(revision);
+    let available = pinned
+        && configured(&git, state)
+            .arg("-C")
+            .arg(dest)
+            .args(["cat-file", "-e", &format!("{revision}^{{commit}}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?
+            .success();
+    if !available {
+        let mut fetch = configured(&git, state);
+        fetch.arg("-C").arg(dest).args([
+            "fetch",
+            "--recurse-submodules=no",
+            "--",
+            "origin",
+            revision,
+        ]);
+        execute(fetch, log, tx, cancel)?;
+    }
+    let mut checkout = configured(&git, state);
+    checkout.arg("-C").arg(dest).args([
+        "checkout",
+        "--detach",
+        if pinned { revision } else { "FETCH_HEAD" },
+    ]);
+    execute(checkout, log, tx, cancel)?;
+    for args in [
+        &["submodule", "sync", "--recursive"][..],
+        &["submodule", "update", "--init", "--recursive"][..],
+    ] {
+        let mut submodule = configured(&git, state);
+        submodule.arg("-C").arg(dest).args(args);
+        execute(submodule, log, tx, cancel)?;
+    }
+    Ok(())
+}
 fn cmake_path(path: &Path) -> String {
     let path = path.to_string_lossy().replace('\\', "/");
     path.strip_prefix("//?/").unwrap_or(&path).to_owned()
@@ -319,6 +371,109 @@ fn launch(
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    #[test]
+    fn edited_commit_and_repository_refresh_existing_checkout() {
+        let root =
+            std::env::temp_dir().join(format!("mixnet-checkout-edit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for folder in ["a", "b", "no-hooks"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        let state = State::default();
+        let git = tool(&state, "git").unwrap();
+        let hooks = format!("core.hooksPath={}", root.join("no-hooks").display());
+        let run = |dir: &Path, args: &[&str]| {
+            let output = configured(&git, &state)
+                .current_dir(dir)
+                .args([
+                    "-c",
+                    "user.name=MixNet Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    &hooks,
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        let a = root.join("a");
+        let b = root.join("b");
+        let checkout = root.join("checkout");
+        run(&a, &["init", "--quiet"]);
+        fs::write(a.join("version.txt"), "first").unwrap();
+        run(&a, &["add", "."]);
+        run(&a, &["commit", "--quiet", "-m", "first"]);
+        run(
+            &root,
+            &[
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                a.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        fs::write(a.join("version.txt"), "new commit").unwrap();
+        run(&a, &["add", "."]);
+        run(&a, &["commit", "--quiet", "-m", "second"]);
+        let revision = run(&a, &["rev-parse", "HEAD"]);
+        let (tx, _rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let log = root.join("build.log");
+        update_checkout(
+            &state,
+            &checkout,
+            a.to_str().unwrap(),
+            &revision,
+            &log,
+            &tx,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(run(&checkout, &["rev-parse", "HEAD"]), revision);
+        assert_eq!(
+            fs::read_to_string(checkout.join("version.txt")).unwrap(),
+            "new commit"
+        );
+        run(&b, &["init", "--quiet"]);
+        fs::write(b.join("version.txt"), "other repository").unwrap();
+        run(&b, &["add", "."]);
+        run(&b, &["commit", "--quiet", "-m", "other"]);
+        let revision = run(&b, &["rev-parse", "HEAD"]);
+        update_checkout(
+            &state,
+            &checkout,
+            b.to_str().unwrap(),
+            &revision,
+            &log,
+            &tx,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(run(&checkout, &["rev-parse", "HEAD"]), revision);
+        assert_eq!(
+            run(&checkout, &["remote", "get-url", "origin"]),
+            b.to_str().unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(checkout.join("version.txt")).unwrap(),
+            "other repository"
+        );
+        assert_eq!(
+            fs::read_to_string(a.join("version.txt")).unwrap(),
+            "new commit"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn streams_stdout_stderr_and_reports_failure() {
         let log = std::env::temp_dir().join(format!("mixnet-process-{}.log", std::process::id()));

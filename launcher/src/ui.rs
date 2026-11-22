@@ -87,6 +87,7 @@ impl AssetSource for Assets {
                 "<path d='M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z'/>"
             }
             Some("edit") => "<path d='m16 3 5 5-12 12H4v-5zM13 6l5 5'/>",
+            Some("trash") => "<path d='M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7'/>",
             Some("play") => "<path d='m8 4 12 8-12 8z'/>",
             Some("plus") => "<path d='M12 5v14M5 12h14'/>",
             Some("check") => "<path d='m5 12 4 4L19 6'/>",

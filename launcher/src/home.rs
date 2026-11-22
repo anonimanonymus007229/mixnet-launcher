@@ -5,7 +5,20 @@ use mixnet_theme::{color as c, layout as l};
 
 impl Launcher {
     pub fn home(&self, cx: &mut Context<Self>) -> AnyElement {
-        let i = self.state.current();
+        let Some(i) = self.state.current_opt() else {
+            return column()
+                .gap(px(20.))
+                .child(heading("Home"))
+                .child(muted(
+                    "No instances yet. Add a source client or an existing executable.",
+                ))
+                .child(
+                    button("new-instance", "New instance", "plus", true).on_click(cx.listener(
+                        |a, _, window, cx| a.open_dialog(DialogKind::Create, window, cx),
+                    )),
+                )
+                .into_any_element();
+        };
         let source = i.is_source();
         let description = match &i.client {
             Client::Source { location, revision } => format!(
@@ -35,8 +48,7 @@ impl Launcher {
                     }))
             }))))
             .child(column().gap(px(18.)).pt(px(16.)).pb(px(26.)).border_b_1().border_color(rgb(c::RULE))
-                .child(row().gap(px(10.)).child(mono("01"))
-                    .child(section_label(if source { "SOURCE INSTANCE" } else { "EXTERNAL CLIENT" })))
+                .child(section_label(if source { "SOURCE INSTANCE" } else { "EXTERNAL CLIENT" }))
                 .child(row().gap(px(10.))
                     .child(div().flex_1().min_w_0().text_size(px(27.)).font_weight(FontWeight::SEMIBOLD).text_ellipsis().child(i.name.clone()))
                     .child(button("play", if self.busy { "Working…" } else if source { "Build and play" } else { "Play" }, "play", true)
@@ -44,13 +56,22 @@ impl Launcher {
                         .on_click(cx.listener(|a, _, _, cx| a.build_play(cx))))
                     .child(icon_button("instance-folder", "folder")
                         .on_click(cx.listener(|a, _, _, cx| a.open_folder(a.store.instance(&a.state.selected), cx))))
-                    .child(icon_button("rename", "edit")
-                        .on_click(cx.listener(|a, _, window, cx| a.open_dialog(DialogKind::Rename, window, cx)))))
+                    .child(icon_button("edit-instance", "edit")
+                        .on_click(cx.listener(|a, _, window, cx| {
+                            let id = a.state.selected.clone();
+                            a.open_dialog(DialogKind::Edit(id), window, cx);
+                        })))
+                    .child(icon_button("delete-instance", "trash")
+                        .hover(|s| s.bg(rgb(0x3b2525)))
+                        .on_click(cx.listener(|a, _, window, cx| {
+                            let id = a.state.selected.clone();
+                            a.open_dialog(DialogKind::Delete(id), window, cx);
+                        }))))
                 .child(mono(description).text_size(px(11.))))
             .child(column().gap(px(16.))
                 .child(row().justify_between()
                     .child(row().gap(px(10.)).child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child("Mixin mods"))
-                        .child(mono(format!("{:02} ENABLED", self.mods.iter().filter(|m| m.enabled).count()))))
+                        .child(mono(format!("{} ENABLED", self.mods.iter().filter(|m| m.enabled).count()))))
                     .when(source, |d| d.child(row().gap(px(8.))
                         .child(button("rescan-mods", "Refresh", "refresh", false).on_click(cx.listener(|a, _, _, cx| { if !a.busy { a.reload_mods(); cx.notify(); } })))
                         .child(button("mods-folder", "Open folder", "folder", false).on_click(cx.listener(|a, _, _, cx| a.open_mods_folder(cx)))))))
@@ -61,10 +82,9 @@ impl Launcher {
                     .child(icon("box").size(px(26.)))
                     .child(div().text_color(rgb(c::SOFT)).child("A clean client. Your mods go here."))
                     .child(muted("Add mixin.toml packages to the mods folder, then click Refresh."))))
-                .when(source, |d| d.children(self.mods.iter().enumerate().map(|(index, m)| {
+                .when(source, |d| d.children(self.mods.iter().map(|m| {
                     let id = m.id.clone(); let enabled = m.enabled;
                     row().id(SharedString::from(format!("mod-{id}"))).h(px(l::ROW)).gap(px(18.)).border_b_1().border_color(rgb(c::RULE))
-                        .child(mono(format!("{:02}", index + 1)).w(px(24.)))
                         .child(column().flex_1().gap(px(5.)).child(div().font_weight(FontWeight::SEMIBOLD).child(m.name.clone()))
                             .child(mono(m.id.clone()).text_size(px(10.))))
                         .child(mono(m.version.clone()))

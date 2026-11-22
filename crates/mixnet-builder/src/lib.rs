@@ -1,4 +1,5 @@
 //! CLI integration is deliberate: the user can select any compatible ddmix.exe.
+mod checkout;
 pub mod mods;
 mod pipeline;
 pub mod repository;

@@ -3,6 +3,7 @@ mod app;
 mod dialogs;
 mod home;
 mod input;
+mod instance_delete;
 mod log_view;
 mod source_picker;
 mod tools;

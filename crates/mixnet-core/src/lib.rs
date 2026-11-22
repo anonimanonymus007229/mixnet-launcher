@@ -62,11 +62,30 @@ impl Default for State {
     }
 }
 impl State {
-    pub fn current(&self) -> &Instance {
+    /// Update only editable metadata, retaining identity, selection and enabled mods.
+    pub fn edit_instance(&mut self, id: &str, name: String, client: Client) -> Result<bool> {
+        if name.trim().is_empty() || name.chars().count() > 80 {
+            bail!("Use an instance name between 1 and 80 characters.");
+        }
+        let instance = self
+            .instances
+            .iter_mut()
+            .find(|i| i.id == id)
+            .context("Instance no longer exists")?;
+        let changed = instance.client != client;
+        instance.name = name;
+        instance.client = client;
+        Ok(changed)
+    }
+    pub fn current_opt(&self) -> Option<&Instance> {
         self.instances
             .iter()
             .find(|i| i.id == self.selected)
-            .unwrap_or(&self.instances[0])
+            .or(self.instances.first())
+    }
+    pub fn current(&self) -> &Instance {
+        self.current_opt()
+            .expect("An instance must be selected for this operation")
     }
     pub fn current_mut(&mut self) -> &mut Instance {
         let index = self
@@ -104,8 +123,8 @@ impl Store {
         if file.exists() {
             let state: State = serde_json::from_slice(&fs::read(&file)?)
                 .context("Cannot read instances.json; existing data was NOT reset")?;
-            if state.schema_version != 1 || state.instances.is_empty() {
-                bail!("Unsupported or empty instance database");
+            if state.schema_version != 1 {
+                bail!("Unsupported instance database version");
             }
             for i in &state.instances {
                 self.prepare(i)?;
@@ -145,6 +164,41 @@ impl Store {
         fs::create_dir_all(self.workspace(&instance.id))?;
         Ok(())
     }
+    /// Persist the new instance list before deleting any owned files. External
+    /// source folders, prebuilt clients and the shared mod catalog are untouched.
+    pub fn delete_instance(&self, state: &mut State, id: &str) -> Result<Vec<String>> {
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            bail!("Invalid instance ID");
+        }
+        if !state.instances.iter().any(|i| i.id == id) {
+            bail!("Instance no longer exists");
+        }
+        let mut next = state.clone();
+        next.instances.retain(|i| i.id != id);
+        if next.selected == id || !next.instances.iter().any(|i| i.id == next.selected) {
+            next.selected = next
+                .instances
+                .first()
+                .map(|i| i.id.clone())
+                .unwrap_or_default();
+        }
+        self.save(&next)?;
+        *state = next;
+        let mut warnings = Vec::new();
+        for path in [
+            self.instance(id),
+            self.workspace(id),
+            self.build(id),
+            self.root.join("sources").join(id),
+        ] {
+            if let Err(error) = fs::remove_dir_all(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                warnings.push(format!("Could not remove {}: {error}", path.display()));
+            }
+        }
+        Ok(warnings)
+    }
     pub fn save(&self, state: &State) -> Result<()> {
         atomic_write(
             &self.root.join("instances.json"),
@@ -165,6 +219,122 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editing_preserves_identity_mods_and_user_data() {
+        let root = std::env::temp_dir().join(format!("mixnet-edit-{}", uuid::Uuid::new_v4()));
+        let store = Store { root: root.clone() };
+        let mut state = store.initialize().unwrap();
+        let id = state.selected.clone();
+        state.current_mut().disabled_mods.push("my-mod".into());
+        let config = store.instance(&id).join("user/settings_ddnet.cfg");
+        fs::write(&config, "player_name Test").unwrap();
+        let client = Client::Source {
+            location: "https://github.com/ddnet/ddnet.git".into(),
+            revision: "c8c3a7904d076449054b51976c4a56bd382e85ab".into(),
+        };
+        assert!(
+            state
+                .edit_instance(&id, "DDNet 19.8".into(), client.clone())
+                .unwrap()
+        );
+        assert!(
+            !state
+                .edit_instance(&id, "Renamed".into(), client.clone())
+                .unwrap()
+        );
+        store.save(&state).unwrap();
+        let loaded = store.initialize().unwrap();
+        assert_eq!(loaded.selected, id);
+        assert_eq!(loaded.instances.len(), 1);
+        assert_eq!(loaded.current().client, client);
+        assert_eq!(loaded.current().disabled_mods, ["my-mod"]);
+        assert_eq!(fs::read_to_string(config).unwrap(), "player_name Test");
+        assert!(
+            state
+                .edit_instance("missing", "Name".into(), client.clone())
+                .is_err()
+        );
+        assert!(state.edit_instance(&id, " ".into(), client).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn deleting_instances_preserves_shared_and_external_files() {
+        let root = std::env::temp_dir().join(format!("mixnet-delete-{}", uuid::Uuid::new_v4()));
+        let store = Store { root: root.clone() };
+        let mut state = store.initialize().unwrap();
+        let external_source = root.join("external-source");
+        fs::create_dir_all(&external_source).unwrap();
+        fs::write(external_source.join("original.cpp"), "original source").unwrap();
+        state.current_mut().client = Client::Source {
+            location: external_source.to_string_lossy().into_owned(),
+            revision: String::new(),
+        };
+        let external = root.join("external-client.exe");
+        fs::write(&external, "original").unwrap();
+        let second = Instance::new(
+            "External".into(),
+            Client::Binary {
+                executable: external.clone(),
+            },
+        );
+        store.prepare(&second).unwrap();
+        state.instances.push(second.clone());
+        fs::write(store.mods().join("keep.txt"), "shared").unwrap();
+        let first_id = state.selected.clone();
+        for path in [
+            store.workspace(&first_id),
+            store.build(&first_id),
+            root.join("sources").join(&first_id),
+        ] {
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("owned"), "owned").unwrap();
+        }
+        assert!(
+            store
+                .delete_instance(&mut state, &first_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(state.selected, second.id);
+        assert!(!store.instance(&first_id).exists());
+        assert!(!store.workspace(&first_id).exists());
+        assert!(!store.build(&first_id).exists());
+        assert!(!root.join("sources").join(&first_id).exists());
+        assert!(
+            store
+                .delete_instance(&mut state, &second.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(state.current_opt().is_none());
+        assert!(state.selected.is_empty());
+        assert!(store.initialize().unwrap().instances.is_empty());
+        assert_eq!(fs::read_to_string(external).unwrap(), "original");
+        assert_eq!(
+            fs::read_to_string(external_source.join("original.cpp")).unwrap(),
+            "original source"
+        );
+        assert_eq!(
+            fs::read_to_string(store.mods().join("keep.txt")).unwrap(),
+            "shared"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn failed_delete_save_leaves_instance_data_intact() {
+        let root =
+            std::env::temp_dir().join(format!("mixnet-delete-failure-{}", uuid::Uuid::new_v4()));
+        let store = Store { root: root.clone() };
+        let mut state = store.initialize().unwrap();
+        let id = state.selected.clone();
+        fs::create_dir(root.join("instances.json.tmp")).unwrap();
+        assert!(store.delete_instance(&mut state, &id).is_err());
+        assert_eq!(state.selected, id);
+        assert_eq!(state.instances.len(), 1);
+        assert!(store.instance(&id).join("user").is_dir());
+        assert!(store.delete_instance(&mut state, "../outside").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn state_roundtrip_and_layout() {
         let root = std::env::temp_dir().join(format!("mixnet-test-{}", uuid::Uuid::new_v4()));

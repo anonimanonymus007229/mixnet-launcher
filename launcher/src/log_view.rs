@@ -39,6 +39,7 @@ impl LogText {
 struct VisualLine {
     start: usize,
     shaped: ShapedLine,
+    hard_break: bool,
 }
 
 pub struct LogView {
@@ -46,6 +47,8 @@ pub struct LogView {
     focus: FocusHandle,
     scroll: ScrollHandle,
     shaped: Option<Rc<Vec<VisualLine>>>,
+    wrap_width: Pixels,
+    resize_subscription: Option<Subscription>,
     area: Rc<Cell<Bounds<Pixels>>>,
     dragging: bool,
 }
@@ -56,6 +59,8 @@ impl LogView {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             shaped: None,
+            wrap_width: px(0.),
+            resize_subscription: None,
             area: Rc::new(Cell::new(Bounds::default())),
             dragging: false,
         }
@@ -152,54 +157,87 @@ impl LogView {
         cx.stop_propagation();
         cx.notify();
     }
-    fn shape(&mut self, window: &Window) -> Rc<Vec<VisualLine>> {
+    fn shape(&mut self, window: &Window, width: Pixels) -> Rc<Vec<VisualLine>> {
         self.shaped
             .get_or_insert_with(|| {
-                let mut start = 0;
-                Rc::new(
-                    self.text
-                        .text
-                        .split('\n')
-                        .map(|text| {
-                            let shaped = window.text_system().shape_line(
-                                text.to_owned().into(),
-                                px(11.),
-                                &[TextRun {
-                                    len: text.len(),
-                                    font: font(mixnet_theme::MONO),
-                                    color: rgb(c::SOFT).into(),
-                                    background_color: None,
-                                    underline: None,
-                                    strikethrough: None,
-                                }],
-                                None,
-                            );
-                            let line = VisualLine { start, shaped };
-                            start += text.len() + 1;
-                            line
+                let mut lines = Vec::new();
+                let mut logical_start = 0;
+                for text in self.text.text.split('\n') {
+                    let text: SharedString = text.to_owned().into();
+                    let runs = [TextRun {
+                        len: text.len(),
+                        font: font(mixnet_theme::MONO),
+                        color: rgb(c::SOFT).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }];
+                    let shaped =
+                        window
+                            .text_system()
+                            .shape_line(text.clone(), px(11.), &runs, None);
+                    // Native wrapping supplies glyph-safe byte boundaries, including long paths/URLs.
+                    let wrapped = window.text_system().shape_text(
+                        text.clone(),
+                        px(11.),
+                        &runs,
+                        Some(width),
+                        None,
+                    );
+                    let boundaries: Vec<_> = wrapped
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|line| {
+                            line.wrap_boundaries
+                                .iter()
+                                .map(|boundary| {
+                                    line.unwrapped_layout.runs[boundary.run_ix].glyphs
+                                        [boundary.glyph_ix]
+                                        .index
+                                })
+                                .collect::<Vec<_>>()
                         })
-                        .collect(),
-                )
+                        .collect();
+                    let mut cursor = shaped.cursor();
+                    let mut start = 0;
+                    for end in boundaries.into_iter().chain([text.len()]) {
+                        lines.push(VisualLine {
+                            start: logical_start + start,
+                            shaped: cursor.take_until(end),
+                            hard_break: end == text.len(),
+                        });
+                        start = end;
+                    }
+                    logical_start += text.len() + 1;
+                }
+                Rc::new(lines)
             })
             .clone()
     }
 }
 impl Render for LogView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let lines = self.shape(window);
-        let width = lines
-            .iter()
-            .map(|line| line.shaped.width)
-            .fold(px(1.), |a, b| a.max(b))
-            + px(8.);
+        if self.resize_subscription.is_none() {
+            self.resize_subscription =
+                Some(cx.observe_window_bounds(window, |_, _, cx| cx.notify()));
+        }
+        let width = (window.viewport_size().width - px(l::SIDEBAR + 2. * l::GUTTER)).max(px(1.));
+        if width != self.wrap_width {
+            self.wrap_width = width;
+            self.shaped = None;
+        }
+        let lines = self.shape(window, width);
         let height = px(lines.len() as f32 * LINE_HEIGHT);
         let selection = self.text.range();
         let area = self.area.clone();
         let view = cx.entity();
         div()
             .id("log-viewport")
+            .w_full()
+            .min_w_0()
             .h(px(190.))
-            .overflow_scroll()
+            .overflow_y_scroll()
+            .overflow_x_hidden()
             .track_scroll(&self.scroll)
             .px(px(l::GUTTER))
             .pb(px(16.))
@@ -241,7 +279,8 @@ impl Render for LogView {
                                 .end
                                 .saturating_sub(line.start)
                                 .min(line.shaped.text.len());
-                            let newline = selection.start <= line.start + line.shaped.text.len()
+                            let newline = line.hard_break
+                                && selection.start <= line.start + line.shaped.text.len()
                                 && selection.end > line.start + line.shaped.text.len();
                             if start < end || newline {
                                 let left = line.shaped.x_for_index(start);
@@ -287,8 +326,7 @@ impl Render for LogView {
                         });
                     },
                 )
-                .w(width)
-                .min_w(relative(1.))
+                .w_full()
                 .h(height),
             )
     }

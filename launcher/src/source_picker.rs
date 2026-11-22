@@ -36,6 +36,10 @@ impl SourcePicker {
             view_signature: (String::new(), String::new()),
         }
     }
+    pub fn seed_location(&mut self, location: &str) {
+        self.input = location.to_owned();
+        self.changed = Instant::now() - Duration::from_secs(1);
+    }
     fn poll(
         &mut self,
         input: String,
@@ -63,12 +67,18 @@ impl SourcePicker {
             self.loading = false;
             match result {
                 Ok(repo) => {
-                    if revision.read(cx).text.is_empty() {
+                    if repo.local || revision.read(cx).text.is_empty() {
                         revision.update(cx, |i, cx| {
                             i.set(repo.head.clone().unwrap_or_default());
                             cx.notify();
                         });
                     }
+                    let current = revision.read(cx).text.trim();
+                    self.selected = repo
+                        .tags
+                        .iter()
+                        .find(|tag| tag.commit == current)
+                        .map(|tag| tag.name.clone());
                     self.repository = Some(repo);
                 }
                 Err(e) => self.error = Some(e),
@@ -143,7 +153,9 @@ impl HomeCommit {
                 return true;
             }
         }
-        let i = state.current();
+        let Some(i) = state.current_opt() else {
+            return false;
+        };
         if let Client::Source { location, revision } = &i.client
             && !repository::is_commit(revision)
             && !(revision.is_empty() && std::path::Path::new(location).is_dir())
@@ -170,7 +182,7 @@ impl Launcher {
     pub fn poll_sources(&mut self, cx: &mut Context<Self>) -> bool {
         let mut changed = false;
         if let Some(d) = &mut self.dialog
-            && matches!(d.kind, DialogKind::Create)
+            && matches!(d.kind, DialogKind::Create | DialogKind::Edit(_))
             && !d.binary
         {
             let input = d.location.read(cx).text.trim().trim_matches('"').to_owned();
