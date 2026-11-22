@@ -20,6 +20,8 @@ pub struct Instance {
     pub name: String,
     pub client: Client,
     #[serde(default)]
+    pub isolate_config: bool,
+    #[serde(default)]
     pub disabled_mods: Vec<String>,
 }
 impl Instance {
@@ -28,6 +30,7 @@ impl Instance {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             client,
+            isolate_config: false,
             disabled_mods: vec![],
         }
     }
@@ -62,8 +65,15 @@ impl Default for State {
     }
 }
 impl State {
-    /// Update only editable metadata, retaining identity, selection and enabled mods.
-    pub fn edit_instance(&mut self, id: &str, name: String, client: Client) -> Result<bool> {
+    /// Retain identity, selection and enabled mods. Return whether the client
+    /// changed; toggling config isolation does not require rebuilding it.
+    pub fn edit_instance(
+        &mut self,
+        id: &str,
+        name: String,
+        client: Client,
+        isolate_config: bool,
+    ) -> Result<bool> {
         if name.trim().is_empty() || name.chars().count() > 80 {
             bail!("Use an instance name between 1 and 80 characters.");
         }
@@ -75,6 +85,7 @@ impl State {
         let changed = instance.client != client;
         instance.name = name;
         instance.client = client;
+        instance.isolate_config = isolate_config;
         Ok(changed)
     }
     pub fn current_opt(&self) -> Option<&Instance> {
@@ -234,12 +245,12 @@ mod tests {
         };
         assert!(
             state
-                .edit_instance(&id, "DDNet 19.8".into(), client.clone())
+                .edit_instance(&id, "DDNet 19.8".into(), client.clone(), true)
                 .unwrap()
         );
         assert!(
             !state
-                .edit_instance(&id, "Renamed".into(), client.clone())
+                .edit_instance(&id, "Renamed".into(), client.clone(), true)
                 .unwrap()
         );
         store.save(&state).unwrap();
@@ -247,15 +258,39 @@ mod tests {
         assert_eq!(loaded.selected, id);
         assert_eq!(loaded.instances.len(), 1);
         assert_eq!(loaded.current().client, client);
+        assert!(loaded.current().isolate_config);
         assert_eq!(loaded.current().disabled_mods, ["my-mod"]);
+        assert!(
+            !state
+                .edit_instance(&id, "Renamed".into(), client.clone(), false)
+                .unwrap()
+        );
+        store.save(&state).unwrap();
+        assert!(!store.initialize().unwrap().current().isolate_config);
         assert_eq!(fs::read_to_string(config).unwrap(), "player_name Test");
         assert!(
             state
-                .edit_instance("missing", "Name".into(), client.clone())
+                .edit_instance("missing", "Name".into(), client.clone(), false)
                 .is_err()
         );
-        assert!(state.edit_instance(&id, " ".into(), client).is_err());
+        assert!(state.edit_instance(&id, " ".into(), client, false).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn config_isolation_defaults_off_for_new_and_legacy_instances() {
+        let state = State::default();
+        assert!(!state.current().isolate_config);
+        let binary = Instance::new(
+            "External".into(),
+            Client::Binary {
+                executable: "DDNet.exe".into(),
+            },
+        );
+        assert!(!binary.isolate_config);
+        let mut legacy = serde_json::to_value(state.current()).unwrap();
+        legacy.as_object_mut().unwrap().remove("isolate_config");
+        let loaded: Instance = serde_json::from_value(legacy).unwrap();
+        assert!(!loaded.isolate_config);
     }
     #[test]
     fn deleting_instances_preserves_shared_and_external_files() {

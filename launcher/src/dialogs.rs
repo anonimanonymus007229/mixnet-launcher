@@ -14,6 +14,7 @@ pub enum DialogKind {
 pub struct Dialog {
     pub kind: DialogKind,
     pub binary: bool,
+    pub isolate_config: bool,
     pub name: Entity<Input>,
     pub location: Entity<Input>,
     pub revision: Entity<Input>,
@@ -61,6 +62,7 @@ impl Dialog {
         Self {
             kind,
             binary,
+            isolate_config: original.is_some_and(|i| i.isolate_config),
             name: cx.new(|cx| Input::new(name, "Instance name", cx)),
             location: cx.new(|cx| Input::new(location, "Path to executable", cx)),
             revision: cx.new(|cx| {
@@ -83,7 +85,7 @@ impl Dialog {
             .trim_matches('"')
             .to_owned();
         let revision = self.revision.read(cx).text.trim().to_owned();
-        // A name-only edit must also work offline, without resetting a pinned commit.
+        // Name/isolation-only edits must work offline without resetting a pinned commit.
         if let Some(original) = &self.original_client {
             let unchanged = match original {
                 Client::Source {
@@ -140,7 +142,8 @@ impl Launcher {
             match kind {
                 DialogKind::Delete(_) => anyhow::bail!("Use the deletion confirmation."),
                 DialogKind::Edit(id) => {
-                    client_changed = next.edit_instance(&id, name, d.client(cx)?)?;
+                    client_changed =
+                        next.edit_instance(&id, name, d.client(cx)?, d.isolate_config)?;
                 }
                 DialogKind::Tool(id) => {
                     if location.is_empty() {
@@ -161,7 +164,8 @@ impl Launcher {
                         !name.is_empty() && name.chars().count() <= 80,
                         "Use an instance name between 1 and 80 characters."
                     );
-                    let instance = Instance::new(name, d.client(cx)?);
+                    let mut instance = Instance::new(name, d.client(cx)?);
+                    instance.isolate_config = d.isolate_config;
                     self.store.prepare(&instance)?;
                     next.selected = instance.id.clone();
                     next.instances.push(instance);
@@ -247,8 +251,21 @@ impl Launcher {
                         .child(button("browse-field", "Browse", "folder", false)
                             .on_click(cx.listener(move |a, _, _, cx| a.pick_field(tool || binary, cx))))))
                 .when(instance_form && !binary, |col| col.child(self.source_fields(cx)))
+                .when(instance_form, |col| col.child(column().gap(px(10.))
+                    .child(row().justify_between().gap(px(12.))
+                        .child(section_label("SEPARATE CLIENT CONFIG"))
+                        .child(button("isolate-config", if d.isolate_config { "On" } else { "Off" }, if d.isolate_config { "check" } else { "close" }, d.isolate_config)
+                            .on_click(cx.listener(|a, _, _, cx| {
+                                if let Some(d) = &mut a.dialog { d.isolate_config = !d.isolate_config; }
+                                cx.notify();
+                            }))))
+                    .child(muted(if d.isolate_config {
+                        "Settings and user files are stored separately for this instance. Existing shared settings are not copied."
+                    } else {
+                        "Uses the client's normal config location. Previously isolated settings are kept for when you turn this back on."
+                    }))))
                 .when(instance_form, |col| col.child(muted(if binary {
-                    "The original game folder stays intact. MixNet provides a separate user directory via DDNet storage.cfg. Forks must support standard DDNet storage behavior."
+                    "The original executable and game assets stay in their original folder. Config isolation requires standard DDNet storage behavior."
                 } else {
                     "Only build sources and mods you trust. Tags are fetched for selection; source code is downloaded only when you build."
                 })))

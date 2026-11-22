@@ -347,8 +347,19 @@ fn launch(
     tx: &Sender<Event>,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let user = store.instance(&i.id).join("user").canonicalize()?;
+    execute(client_command(store, i, state, exe)?, log, tx, cancel)
+}
+
+fn client_command(store: &Store, i: &Instance, state: &State, exe: &Path) -> Result<Command> {
     let client = exe.parent().context("Executable has no parent folder")?;
+    let mut cmd = configured(exe, state);
+    if !i.isolate_config {
+        // Preserve the client's native storage.cfg / $USERDIR behavior. Do not
+        // read, overwrite or remove the instance's previous isolated settings.
+        cmd.current_dir(client);
+        return Ok(cmd);
+    }
+    let user = store.instance(&i.id).join("user").canonicalize()?;
     // DDNet reads storage.cfg in cwd first. The first path is the save path.
     // Never add $USERDIR: no reads/writes to the shared APPDATA/DDNet profile.
     let paths = [user.clone(), client.to_path_buf(), client.join("data")];
@@ -363,9 +374,8 @@ fn launch(
         storage.push_str(&format!("add_path {p}\n"));
     }
     fs::write(user.join("storage.cfg"), storage)?;
-    let mut cmd = configured(exe, state);
     cmd.current_dir(user);
-    execute(cmd, log, tx, cancel)
+    Ok(cmd)
 }
 
 #[cfg(all(test, windows))]
@@ -513,25 +523,58 @@ mod tests {
     fn storage_configuration_does_not_reference_shared_userdir() {
         let root = std::env::temp_dir().join(format!("mixnet-storage-test-{}", std::process::id()));
         let store = Store { root: root.clone() };
-        let state = store.initialize().unwrap();
-        let exe =
-            PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/whoami.exe");
-        let (tx, _) = mpsc::channel();
-        launch(
-            &store,
-            state.current(),
-            &state,
-            &exe,
-            &store.instance(&state.selected).join("logs/test.log"),
-            &tx,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        let cfg =
-            fs::read_to_string(store.instance(&state.selected).join("user/storage.cfg")).unwrap();
+        let mut state = store.initialize().unwrap();
+        state.current_mut().isolate_config = true;
+        let exe = root.join("client/DDNet.exe");
+        let cmd = client_command(&store, state.current(), &state, &exe).unwrap();
+        let user = store
+            .instance(&state.selected)
+            .join("user")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(user.as_path()));
+        let cfg = fs::read_to_string(user.join("storage.cfg")).unwrap();
         assert!(!cfg.contains("$USERDIR"));
         assert!(!cfg.contains("//?/"));
         assert!(cfg.lines().next().unwrap().ends_with("/user"));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn native_storage_is_default_and_toggling_preserves_both_profiles() {
+        let root =
+            std::env::temp_dir().join(format!("mixnet-native-storage-{}", std::process::id()));
+        let store = Store { root: root.clone() };
+        let mut state = store.initialize().unwrap();
+        let client = root.join("external-client");
+        fs::create_dir_all(&client).unwrap();
+        let exe = client.join("DDNet.exe");
+        let native_config = client.join("storage.cfg");
+        fs::write(&native_config, "add_path $USERDIR\n").unwrap();
+        let user = store.instance(&state.selected).join("user");
+        let isolated_storage = user.join("storage.cfg");
+        let settings = user.join("settings_ddnet.cfg");
+        fs::write(&settings, "player_name Isolated").unwrap();
+        let cmd = client_command(&store, state.current(), &state, &exe).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(client.as_path()));
+        assert!(!isolated_storage.exists());
+        state.current_mut().isolate_config = true;
+        client_command(&store, state.current(), &state, &exe).unwrap();
+        let previous = fs::read(&isolated_storage).unwrap();
+        state.current_mut().isolate_config = false;
+        let cmd = client_command(&store, state.current(), &state, &exe).unwrap();
+        assert_eq!(cmd.get_current_dir(), Some(client.as_path()));
+        assert_eq!(fs::read(&isolated_storage).unwrap(), previous);
+        state.current_mut().isolate_config = true;
+        client_command(&store, state.current(), &state, &exe).unwrap();
+        assert_eq!(fs::read(&isolated_storage).unwrap(), previous);
+        assert_eq!(
+            fs::read_to_string(&settings).unwrap(),
+            "player_name Isolated"
+        );
+        assert_eq!(
+            fs::read_to_string(&native_config).unwrap(),
+            "add_path $USERDIR\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
